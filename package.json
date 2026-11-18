@@ -1,6 +1,6 @@
 {
   "name": "dsh-token-billing",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "type": "module",
   "description": "Token usage and billing in the DeepSeek Harness title bar: today's spend, account balance, token mix, and a seven-day chart in a Control Center-style popover.",
   "keywords": [
@@ -13,6 +13,11 @@
     "balance"
   ],
   "icon": "./icon.svg",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/lucasnixf-hash/dsh-token-billing.git"
+  },
+  "homepage": "https://github.com/lucasnixf-hash/dsh-token-billing",
   "exports": {
     ".": "./index.js",
     "./client": "./client.js",
@@ -27,6 +32,7 @@
     "icon.svg",
     "README.md",
     "PUBLISHING.md",
+    "test/*.test.js",
     "LICENSE"
   ],
   "dsh": {
@@ -74,7 +80,8 @@
     "access": "public"
   },
   "scripts": {
-    "pack": "npm pack"
+    "pack": "npm pack",
+    "test": "node --test test/*.test.js"
   },
   "license": "MIT"
 }

@@ -18,7 +18,7 @@
 import { promises as fs } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
-import { zstdDecompressSync } from 'node:zlib';
+import * as zlib from 'node:zlib';
 
 export const inject = ['webServer'];
 
@@ -34,11 +34,15 @@ const ROUTE = '/api/token-billing/summary';
 const SNAPSHOT_TTL_MS = 12000;
 const TOKEN_TTL_MS = 30000;
 const COST_LEDGER_TTL_MS = 30000;
+const ACCOUNT_STATE_TIMEOUT_MS = 3000;
+const zstdDecompressSync = typeof zlib.zstdDecompressSync === 'function' ? zlib.zstdDecompressSync : null;
 
 let snapshotCache = null;
 let snapshotInflight = null;
 let tokenCache = null;
 let tokenInflight = null;
+let tokenFileCacheDay = null;
+const tokenFileCache = new Map();
 let costLedgerCache = null;
 let costLedgerInflight = null;
 let warned = false;
@@ -169,7 +173,8 @@ async function readAccount(ctx) {
   if (!account) return { state: null, balance: null };
   let state = null;
   try {
-    state = await account.getState();
+    const result = await withTimeout(account.getState(), ACCOUNT_STATE_TIMEOUT_MS);
+    state = result.timedOut ? null : result.value;
   } catch {
     state = null;
   }
@@ -334,13 +339,15 @@ function pickCost(entry, config) {
   if (currency === 'CNY') value = entry.costCny ?? entry.apiCostCny ?? null;
   else if (currency === 'EUR') value = entry.costEur ?? entry.apiCostEur ?? null;
   if (value === null || value === undefined) {
-    if (entry.cost !== null && entry.cost !== undefined) {
+    if (entry.cost !== null && entry.cost !== undefined && entry.cost !== '') {
       if (currency === 'CNY') value = Number(entry.cost) * rate;
       else if (currency === 'EUR') value = Number(entry.cost) * (Number(config && config.fxRates && config.fxRates.EUR) || 1);
       else value = entry.cost;
     }
   }
-  return Number.isFinite(Number(value)) ? Number(value) : null;
+  return value === null || value === undefined || value === ''
+    ? null
+    : Number.isFinite(Number(value)) ? Number(value) : null;
 }
 
 function costLedgerView(ledger, day) {
@@ -376,15 +383,22 @@ function costLedgerView(ledger, day) {
 function scanZstdFrames(buffer) {
   const frames = [];
   let offset = 0;
+  let invalid = false;
   while (offset < buffer.length) {
     const start = offset;
     if (buffer.length - offset < 4) break;
-    if (buffer.readUInt32LE(offset) !== ZSTD_MAGIC) break;
+    if (buffer.readUInt32LE(offset) !== ZSTD_MAGIC) {
+      invalid = true;
+      break;
+    }
     offset += 4;
     if (offset === buffer.length) break;
     const descriptor = buffer.readUInt8(offset);
     offset += 1;
-    if ((descriptor & 24) !== 0) break;
+    if ((descriptor & 24) !== 0) {
+      invalid = true;
+      break;
+    }
     const contentSizeFlag = descriptor >>> 6;
     const singleSegment = (descriptor & 32) !== 0;
     const checksum = (descriptor & 4) !== 0;
@@ -395,13 +409,17 @@ function scanZstdFrames(buffer) {
     if (buffer.length - offset < remainingHeaderBytes) break;
     offset += remainingHeaderBytes;
     let complete = false;
+    let invalidBlock = false;
     while (buffer.length - offset >= 3) {
       const blockHeader = buffer.readUIntLE(offset, 3);
       offset += 3;
       const lastBlock = (blockHeader & 1) !== 0;
       const blockType = (blockHeader >>> 1) & 3;
       const blockSize = blockHeader >>> 3;
-      if (blockType === 3) break;
+      if (blockType === 3) {
+        invalidBlock = true;
+        break;
+      }
       const blockBytes = blockType === 1 ? 1 : blockSize;
       if (buffer.length - offset < blockBytes) break;
       offset += blockBytes;
@@ -410,6 +428,10 @@ function scanZstdFrames(buffer) {
         break;
       }
     }
+    if (invalidBlock) {
+      invalid = true;
+      break;
+    }
     if (!complete) break;
     if (checksum) {
       if (buffer.length - offset < 4) break;
@@ -417,26 +439,117 @@ function scanZstdFrames(buffer) {
     }
     frames.push({ start, end: offset });
   }
-  return frames;
+  return { frames, consumed: frames.length ? frames[frames.length - 1].end : 0, invalid };
 }
 
-async function readSessionText(path) {
+function emptyTokenTotals() {
+  return { input: 0, cache: 0, output: 0, reasoning: 0, calls: 0 };
+}
+
+function foldTokenLine(line, start, fallbackTime, totals) {
+  if (!line || line.indexOf('"assistant/message"') < 0) return;
+  let event;
+  try {
+    event = JSON.parse(line);
+  } catch {
+    return;
+  }
+  if (!event || event.type !== 'assistant/message') return;
+  const time = Number(event.time) || fallbackTime;
+  if (time < start) return;
+  const usage = event.data && event.data.usage;
+  if (!usage) return;
+  totals.input += num(usage.inputTokens);
+  totals.cache += num(usage.cacheReadTokens) + num(usage.cacheWriteTokens);
+  totals.output += num(usage.outputTokens);
+  totals.reasoning += num(usage.reasoningTokens);
+  totals.calls += 1;
+}
+
+function foldTokenBuffer(buffer, start, fallbackTime, totals) {
+  const lastNewline = buffer.lastIndexOf(10);
+  const completeBytes = lastNewline + 1;
+  if (completeBytes > 0) {
+    for (const line of buffer.subarray(0, completeBytes).toString('utf8').split('\n')) {
+      foldTokenLine(line, start, fallbackTime, totals);
+    }
+  }
+  const tail = buffer.subarray(completeBytes);
+  if (tail.length === 0) return { consumed: buffer.length, tail: Buffer.alloc(0) };
+  const tailText = tail.toString('utf8');
+  try {
+    JSON.parse(tailText);
+    foldTokenLine(tailText, start, fallbackTime, totals);
+    return { consumed: buffer.length, tail: Buffer.alloc(0) };
+  } catch {
+    return { consumed: completeBytes, tail };
+  }
+}
+
+async function readFileRange(path, start, size) {
+  const length = Math.max(0, size - start);
+  if (length === 0) return Buffer.alloc(0);
+  const handle = await fs.open(path, 'r');
+  try {
+    const buffer = Buffer.allocUnsafe(length);
+    let read = 0;
+    while (read < length) {
+      const result = await handle.read(buffer, read, length - read, start + read);
+      if (result.bytesRead === 0) break;
+      read += result.bytesRead;
+    }
+    return buffer.subarray(0, read);
+  } finally {
+    await handle.close();
+  }
+}
+
+async function scanTokenFile(path, stat, cached, dayStart) {
+  if (cached && cached.ino === stat.ino && cached.size === stat.size && cached.mtimeMs === stat.mtimeMs) {
+    return cached;
+  }
+  const append = cached && !cached.unavailable && cached.ino === stat.ino &&
+    cached.size < stat.size && cached.offset <= cached.size;
+  const totals = append ? { ...cached.totals } : emptyTokenTotals();
+  const offset = append ? cached.offset : 0;
+  const base = { ino: stat.ino, mtimeMs: stat.mtimeMs, totals };
+
   if (path.endsWith('.jsonl.zstd')) {
-    const buffer = await fs.readFile(path);
-    const frames = scanZstdFrames(buffer);
-    if (frames.length === 0) return '';
-    const parts = [];
-    for (const frame of frames) {
+    if (!zstdDecompressSync) {
+      return { ...base, size: stat.size, offset: 0, unavailable: true };
+    }
+    const buffer = await readFileRange(path, offset, stat.size);
+    const parsed = scanZstdFrames(buffer);
+    if (parsed.invalid) {
+      return { ...base, size: stat.size, offset, unavailable: true };
+    }
+    const parts = append && cached.tail.length ? [cached.tail] : [];
+    for (const frame of parsed.frames) {
       try {
         parts.push(zstdDecompressSync(buffer.subarray(frame.start, frame.end)));
       } catch {
-        /* a torn final frame is expected while a session is being written */
+        return { ...base, size: stat.size, offset, unavailable: true };
       }
     }
-    return Buffer.concat(parts).toString('utf8');
+    const folded = foldTokenBuffer(Buffer.concat(parts), dayStart, stat.mtimeMs, totals);
+    return {
+      ...base,
+      size: offset + buffer.length,
+      offset: offset + parsed.consumed,
+      tail: folded.tail,
+      unavailable: false
+    };
   }
-  if (path.endsWith('.jsonl')) return fs.readFile(path, 'utf8');
-  return '';
+
+  const buffer = await readFileRange(path, offset, stat.size);
+  const folded = foldTokenBuffer(buffer, dayStart, stat.mtimeMs, totals);
+  return {
+    ...base,
+    size: offset + buffer.length,
+    offset: offset + folded.consumed,
+    tail: folded.tail,
+    unavailable: false
+  };
 }
 
 async function walkSessionFiles(dir, out = []) {
@@ -462,13 +575,27 @@ async function scanTokens(day) {
   if (tokenCache && tokenCache.day === day && now - tokenCache.at < TOKEN_TTL_MS) {
     return tokenCache.value;
   }
-  if (tokenInflight) return tokenInflight;
-  tokenInflight = (async () => {
+  if (tokenInflight) {
+    if (tokenInflight.day === day) return tokenInflight.promise;
+    try {
+      await tokenInflight.promise;
+    } catch {
+      /* a previous day's scan must not block the new day */
+    }
+    if (tokenInflight && tokenInflight.day === day) return tokenInflight.promise;
+  }
+  const promise = (async () => {
+    if (tokenFileCacheDay !== day) {
+      tokenFileCache.clear();
+      tokenFileCacheDay = day;
+    }
     const start = startOfDay(day);
     const cutoff = start - 2 * 60 * 60 * 1000;
     const root = join(dshHome(), 'sessions');
     const files = await walkSessionFiles(root);
-    const totals = { input: 0, cache: 0, output: 0, reasoning: 0, calls: 0 };
+    const totals = emptyTokenTotals();
+    const seen = new Set();
+    let unavailable = false;
     for (const path of files) {
       let stat;
       try {
@@ -477,34 +604,24 @@ async function scanTokens(day) {
         continue;
       }
       if (stat.mtimeMs < cutoff) continue;
-      let text;
+      seen.add(path);
+      let entry;
       try {
-        text = await readSessionText(path);
+        entry = await scanTokenFile(path, stat, tokenFileCache.get(path), start);
       } catch {
+        unavailable = true;
         continue;
       }
-      if (!text) continue;
-      for (const line of text.split('\n')) {
-        if (!line || line.indexOf('"assistant/message"') < 0) continue;
-        let event;
-        try {
-          event = JSON.parse(line);
-        } catch {
-          continue;
-        }
-        if (!event || event.type !== 'assistant/message') continue;
-        const time = Number(event.time) || stat.mtimeMs;
-        if (time < start) continue;
-        const usage = event.data && event.data.usage;
-        if (!usage) continue;
-        totals.input += num(usage.inputTokens);
-        totals.cache += num(usage.cacheReadTokens) + num(usage.cacheWriteTokens);
-        totals.output += num(usage.outputTokens);
-        totals.reasoning += num(usage.reasoningTokens);
-        totals.calls += 1;
+      tokenFileCache.set(path, entry);
+      if (entry.unavailable) unavailable = true;
+      for (const key of Object.keys(totals)) {
+        totals[key] += entry.totals[key];
       }
     }
-    const value = {
+    for (const path of tokenFileCache.keys()) {
+      if (!seen.has(path)) tokenFileCache.delete(path);
+    }
+    const value = unavailable ? null : {
       total: totals.input + totals.cache + totals.output + totals.reasoning,
       input: totals.input,
       cache: totals.cache,
@@ -513,10 +630,13 @@ async function scanTokens(day) {
     };
     tokenCache = { at: Date.now(), day, value };
     return value;
-  })().finally(() => {
-    tokenInflight = null;
-  });
-  return tokenInflight;
+  })();
+  tokenInflight = { day, promise };
+  try {
+    return await promise;
+  } finally {
+    if (tokenInflight && tokenInflight.promise === promise) tokenInflight = null;
+  }
 }
 
 /* ------------------------------------------------------------------------- */

@@ -48,6 +48,7 @@ window.__ModuleLoader__.load({
       'pill.aria': '查看用量与计费',
       'pill.title': '今日消费',
       'pill.balanceTitle': '账户余额',
+      'pill.cached': '缓存',
       'panel.title': '用量与计费',
       'panel.subtitle': 'DeepSeek 账户',
       'panel.signedOut': '未登录 DeepSeek 账号',
@@ -92,6 +93,7 @@ window.__ModuleLoader__.load({
       'pill.aria': 'View usage and billing',
       'pill.title': "Today's spend",
       'pill.balanceTitle': 'Account balance',
+      'pill.cached': 'Cached',
       'panel.title': 'Usage & billing',
       'panel.subtitle': 'DeepSeek account',
       'panel.signedOut': 'Not signed in to DeepSeek',
@@ -423,13 +425,15 @@ window.__ModuleLoader__.load({
       if (currency === 'CNY') value = entry.costCny ?? entry.apiCostCny ?? null;
       else if (currency === 'EUR') value = entry.costEur ?? entry.apiCostEur ?? null;
       if (value === null || value === undefined) {
-        if (entry.cost !== null && entry.cost !== undefined) {
+        if (entry.cost !== null && entry.cost !== undefined && entry.cost !== '') {
           if (currency === 'CNY') value = Number(entry.cost) * rate;
           else if (currency === 'EUR') value = Number(entry.cost) * (Number(config && config.fxRates && config.fxRates.EUR) || 1);
           else value = entry.cost;
         }
       }
-      return Number.isFinite(Number(value)) ? Number(value) : null;
+      return value === null || value === undefined || value === ''
+        ? null
+        : Number.isFinite(Number(value)) ? Number(value) : null;
     }
 
     function parseCostBalance(balance, fallbackCurrency) {
@@ -467,7 +471,7 @@ window.__ModuleLoader__.load({
       }
       return {
         currency,
-        cost: cost === null ? 0 : cost,
+        cost,
         tokens: input + cache + output,
         input,
         cache,
@@ -639,13 +643,16 @@ window.__ModuleLoader__.load({
       let observedFrom = null;
 
       if (parsedCost) {
-        todayCost = parsedCost.cost;
-        todayCurrency = parsedCost.currency;
         todayTokens = parsedCost.tokens;
         todayInput = parsedCost.input;
         todayCache = parsedCost.cache;
         todayOutput = parsedCost.output;
         calls = parsedCost.calls;
+      }
+
+      if (parsedCost && parsedCost.cost !== null) {
+        todayCost = parsedCost.cost;
+        todayCurrency = parsedCost.currency;
         history = parsedCost.history;
         todayKey = parsedCost.todayKey;
         source = 'ledger';
@@ -663,9 +670,9 @@ window.__ModuleLoader__.load({
       }
 
       let error = null;
-      if (!parsedCost && !balance) error = 'all';
+      if (todayCost === null && !balance) error = 'all';
       else if (!balance) error = 'balance';
-      else if (!parsedCost) error = null;
+      else if (todayCost === null) error = 'cost';
 
       snapshotCache = {
         fetchedAt: now,
@@ -1356,11 +1363,17 @@ window.__ModuleLoader__.load({
       const costText = snapshot ? formatMoney(snapshot.todayCost, snapshot.todayCurrency) : null;
       const balanceText = snapshot && snapshot.balance ? formatMoney(snapshot.balance.total, snapshot.balance.currency) : null;
       const pillText = balanceText;
+      const staleBalance = Boolean(snapshot && snapshot.balance && snapshot.balance.stale);
+      const observedAt = staleBalance && (snapshot.balanceObservedAt || snapshot.balance.observedAt);
+      const staleHint = staleBalance
+        ? observedAt ? t('hint.balanceStale', { time: formatDateTime(observedAt) }) : t('balanceCachedSub')
+        : '';
       const ariaLabel = snapshot
-        ? t('pill.aria') + ': ' + t('balance') + ' ' + (balanceText || '—') + ', ' + t('today') + ' ' + (costText || '—')
+        ? t('pill.aria') + ': ' + t('balance') + ' ' + (balanceText || '—') +
+          (staleBalance ? ', ' + staleHint : '') + ', ' + t('today') + ' ' + (costText || '—')
         : t('pill.aria');
       const pillTitle = snapshot
-        ? t('pill.balanceTitle') + ' ' + (balanceText || '—')
+        ? t('pill.balanceTitle') + ' ' + (balanceText || '—') + (staleBalance ? ' · ' + staleHint : '')
         : t('loading');
 
       const panel =
@@ -1400,6 +1413,7 @@ window.__ModuleLoader__.load({
             type: 'button',
             className: 'tb-pill',
             'data-open': open ? 'true' : 'false',
+            'data-stale': staleBalance ? 'true' : 'false',
             'aria-label': ariaLabel,
             'aria-haspopup': 'dialog',
             'aria-expanded': open ? 'true' : 'false',
@@ -1407,9 +1421,11 @@ window.__ModuleLoader__.load({
             onClick: toggle
           },
           h(IconCoin, { size: 16, className: 'tb-pill-icon' }),
+          staleBalance ? h('span', { className: 'tb-pill-stale-dot', 'aria-hidden': 'true', title: t('pill.cached') }) : null,
           snapshot
             ? h('span', { className: 'tb-pill-text' }, pillText || '—')
-            : h('span', { className: 'tb-pill-skeleton', 'aria-hidden': 'true' })
+            : h('span', { className: 'tb-pill-skeleton', 'aria-hidden': 'true' }),
+          staleBalance ? h('span', { className: 'tb-pill-stale-badge', 'aria-hidden': 'true' }, t('pill.cached')) : null
         ),
         panel
       );
@@ -1426,6 +1442,8 @@ window.__ModuleLoader__.load({
 .tb-pill:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:2px}
 .tb-pill[data-open="true"]{background:var(--dsw-alias-button-ghost-active-fill);border-color:var(--dsw-alias-button-ghost-active-border);color:var(--dsw-alias-label-primary)}
 .tb-pill-icon{display:block;flex:none;filter:drop-shadow(0 1px 2px rgba(0,0,0,.16))}
+.tb-pill-stale-dot{display:block;width:6px;height:6px;flex:none;border-radius:50%;background:var(--dsw-alias-state-warn-primary)}
+.tb-pill-stale-badge{flex:none;color:var(--dsw-alias-state-warn-primary);font-size:10px;font-weight:650}
 .tb-pill-text{min-width:0;overflow:hidden;text-overflow:ellipsis;font-variant-numeric:tabular-nums}
 .tb-pill-skeleton{display:block;width:38px;height:7px;border-radius:4px;background:linear-gradient(90deg,var(--dsw-alias-bg-skeleton) 25%,var(--dsw-alias-bg-layer-3) 45%,var(--dsw-alias-bg-skeleton) 65%);background-size:220% 100%;animation:tb-shimmer 1.6s linear infinite}
 .tb-panel{position:fixed;z-index:1000;box-sizing:border-box;display:flex;flex-direction:column;gap:9px;padding:13px 14px;overflow-y:auto;overscroll-behavior:contain;border:1px solid color-mix(in srgb,var(--dsw-alias-border-l2) 72%,transparent);border-radius:22px;background:color-mix(in srgb,var(--dsw-alias-bg-layer-2) 86%,transparent);box-shadow:0 28px 70px rgba(0,0,0,.34),0 4px 18px rgba(0,0,0,.16),inset 0 1px 0 rgba(255,255,255,.13);backdrop-filter:blur(30px) saturate(1.65);-webkit-backdrop-filter:blur(30px) saturate(1.65);color:var(--dsw-alias-label-primary);font:inherit;font-size:12px;line-height:1.35;outline:none;-webkit-app-region:no-drag;animation:tb-pop .3s cubic-bezier(.18,1.18,.34,1) both;transform-origin:var(--tb-origin,100%) 0}
@@ -1517,7 +1535,7 @@ window.__ModuleLoader__.load({
 @keyframes tb-shimmer{0%{background-position:120% 0}100%{background-position:-120% 0}}
 @keyframes tb-spin{to{transform:rotate(360deg)}}
 @keyframes tb-pulse{0%,100%{opacity:1}50%{opacity:.45}}
-@media (max-width:640px){.tb-pill-text{display:none}.tb-pill{width:28px;padding:0;justify-content:center}}
+@media (max-width:640px){.tb-pill-text,.tb-pill-stale-badge{display:none}.tb-pill{width:28px;padding:0;justify-content:center}.tb-pill[data-stale="true"]{gap:2px}}
 @media (prefers-reduced-motion:reduce){.tb-panel,.tb-card,.tb-bar,.tb-pill,.tb-icon-btn,.tb-token-seg{animation:none!important;transition:none!important}.tb-spin{animation:none!important}.tb-live[data-state="busy"]{animation:none!important}}
 `;
 

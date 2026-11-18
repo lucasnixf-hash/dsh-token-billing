@@ -17,7 +17,7 @@ The bundle has a small host half and a browser half.
 - **Account balance** comes from the optional `deepseekAccount` host service,
   the same service Settings → Account uses. If that call fails, the control
   falls back to the last balance cached in the cost-meter or token-billing
-  ledger and labels it as a cache.
+  ledger and marks it as cached in the title-bar pill and popover.
 - **Today's spend** comes from a balance-delta ledger maintained by the host
   at `$DSH_HOME/storages/token-billing/ledger.json`. When the previous day's
   balance is available near midnight, today's opening balance is seeded from
@@ -25,7 +25,10 @@ The bundle has a small host half and a browser half.
   and labels the estimate.
 - **Token usage** is folded from today's committed session logs
   (`$DSH_HOME/sessions/**/session.v*.jsonl[.zstd]`), summing the usage
-  reported by completed Assistant messages.
+  reported by completed Assistant messages. The scanner reads only appended
+  data after its first pass. On Node 20 or Node 22 before 22.15, compressed
+  `.zstd` logs cannot be decoded by Node itself; token usage is shown as
+  unavailable unless cost-meter supplies it. Balance and spending still work.
 - **Cost-meter** is optional. If its ledger exists, its exact priced day is
   preferred for today's spend, and its history is available to the chart.
 
@@ -34,7 +37,8 @@ The route is loopback-only and returns no credentials or provider keys.
 
 ## Install
 
-Install the package directory as a bundle in the current profile. The row in
+Download the [v0.1.1 package](https://github.com/lucasnixf-hash/dsh-token-billing/releases/download/v0.1.1/dsh-token-billing-0.1.1.tgz),
+or install the package directory as a bundle in the current profile. The row in
 `cordis.patch.yml` mounts the host route; the browser module registers itself
 in `conversation.session.header.utilities`.
 

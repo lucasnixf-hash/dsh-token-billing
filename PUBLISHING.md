@@ -10,14 +10,14 @@
 npm pack
 ```
 
-会得到 `dsh-token-billing-0.1.0.tgz`。把它发给对方即可。
+会得到 `dsh-token-billing-0.1.1.tgz`。把它发给对方即可。
 
 对方有两种安装方式：
 
 ### 1. 普通 `dsh web` / CLI profile
 
 ```sh
-dsh plugin --profile web add /absolute/path/to/dsh-token-billing-0.1.0.tgz
+dsh plugin --profile web add /absolute/path/to/dsh-token-billing-0.1.1.tgz
 ```
 
 然后重启对应的 `dsh web`。
@@ -28,7 +28,7 @@ dsh plugin --profile web add /absolute/path/to/dsh-token-billing-0.1.0.tgz
 
 ```sh
 mkdir dsh-token-billing
-tar -xzf dsh-token-billing-0.1.0.tgz -C dsh-token-billing --strip-components=1
+tar -xzf dsh-token-billing-0.1.1.tgz -C dsh-token-billing --strip-components=1
 ```
 
 然后把 `/absolute/path/to/dsh-token-billing` 作为 bundle 目录安装。
@@ -37,7 +37,7 @@ tar -xzf dsh-token-billing-0.1.0.tgz -C dsh-token-billing --strip-components=1
 
 ## 二、发布前确认名字
 
-当前包名已经是 `dsh-token-billing`（截至 2026-11-10 在 npm 上未被占用），并且已经移除 `"private": true`，可以直接按下面的步骤发布。
+当前包名是 `dsh-token-billing`，并且没有 `"private": true`。发布到 npm 前仍需确认包名可用。
 
 如果以后想换成带 scope 的名字（例如 `@your-name/dsh-token-billing`），要同步三处，漏一处会导致客户端模块加载不到：
 
@@ -45,7 +45,7 @@ tar -xzf dsh-token-billing-0.1.0.tgz -C dsh-token-billing --strip-components=1
 2. `cordis.patch.yml` 里 `name:` 的值；
 3. `client.js` 顶部 `window.__ModuleLoader__.load({ id: ... })` 的 `id`。
 
-另外建议补上 `repository`、`homepage`、`author`；版本号遵循 semver，每次发布前 bump `version`。改名后先在本地重新安装一次，确认顶栏和面板仍然正常。
+`repository` 和 `homepage` 已指向 GitHub 仓库；如果以后补充 `author`，也要在发布前检查。版本号遵循 semver，每次发布前 bump `version`。改名后先在本地重新安装一次，确认顶栏和面板仍然正常。
 
 ## 三、发布到 npm
 
@@ -71,15 +71,15 @@ dsh plugin --profile web add dsh-token-billing
 
 ```sh
 npm pack
-gh release create v0.1.0 ./dsh-token-billing-0.1.0.tgz \
-  --title "v0.1.0" --notes "First public test build"
+gh release create v0.1.1 ./dsh-token-billing-0.1.1.tgz \
+  --title "v0.1.1" --notes "Fix balance and usage reporting"
 ```
 
 别人可以直接装 Release 附件：
 
 ```sh
 dsh plugin --profile web add \
-  https://github.com/<owner>/dsh-token-billing/releases/download/v0.1.0/dsh-token-billing-0.1.0.tgz
+  https://github.com/lucasnixf-hash/dsh-token-billing/releases/download/v0.1.1/dsh-token-billing-0.1.1.tgz
 ```
 
 这种方式不需要 npm 账号，也适合只给几个人测试。缺点是市场里不会自动出现条目，除非另外提交目录。
