@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Usage & billing",
+    "description": "Shows today's spend and account balance in the title bar, with a Control Center-style popover for token mix and the last seven days."
+  }
+}
